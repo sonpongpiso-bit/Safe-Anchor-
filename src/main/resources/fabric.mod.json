@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "safeanchor",
+  "version": "${version}",
+  "name": "Safe Anchor",
+  "description": "One-key respawn anchor sequence: place, charge, shield with glowstone, detonate. Configurable via an in-game menu (INSERT).",
+  "authors": ["Safe Anchor Contributors"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.safeanchor.client.SafeAnchorClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
