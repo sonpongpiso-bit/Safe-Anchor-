@@ -18,10 +18,16 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
 public final class AnchorSequence {
     private enum Step { PLACE_ANCHOR, CHARGE, PLACE_GLOWSTONE, DETONATE }
 
     private static final int CONFIRM_TIMEOUT = 20;
+    private static final Direction[] HORIZONTAL =
+            { Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST };
 
     private boolean active;
     private Step step;
@@ -30,13 +36,14 @@ public final class AnchorSequence {
 
     private BlockHitResult initialHit;
     private BlockPos anchorPos;
-    private Direction towardPlayer;
     private boolean anchorExisted;
     private int originalSlot;
 
     public boolean isActive() {
         return active;
     }
+
+    // ------------------------------------------------------------------ start
 
     public void start(Minecraft mc) {
         if (active) return;
@@ -69,12 +76,6 @@ public final class AnchorSequence {
             if (!level.isUnobstructed(Blocks.RESPAWN_ANCHOR.defaultBlockState(), anchorPos, CollisionContext.empty())) return;
         }
 
-        double dx = player.getX() - (anchorPos.getX() + 0.5);
-        double dz = player.getZ() - (anchorPos.getZ() + 0.5);
-        towardPlayer = (Math.abs(dx) < 0.01 && Math.abs(dz) < 0.01)
-                ? player.getDirection().getOpposite()
-                : Direction.getApproximateNearest(dx, 0.0, dz);
-
         initialHit = hit;
         originalSlot = player.getInventory().getSelectedSlot();
         step = Step.PLACE_ANCHOR;
@@ -82,6 +83,8 @@ public final class AnchorSequence {
         waited = 0;
         active = true;
     }
+
+    // ------------------------------------------------------------------- tick
 
     public void tick(Minecraft mc) {
         if (!active) return;
@@ -115,6 +118,8 @@ public final class AnchorSequence {
         }
     }
 
+    // ------------------------------------------------------------------ steps
+
     private boolean placeAnchor(Minecraft mc, LocalPlayer player, ClientLevel level) {
         if (anchorExisted) {
             step = Step.CHARGE;
@@ -138,7 +143,7 @@ public final class AnchorSequence {
         int slot = findSlot(player, Items.GLOWSTONE);
         if (slot < 0) return abort(mc);
         if (!ensureSlot(player, slot)) return false;
-        if (!use(mc, player, faceHit(anchorPos, towardPlayer))) return abort(mc);
+        if (!use(mc, player, faceHit(anchorPos, pickAnchorFace(player, level)))) return abort(mc);
         step = Step.PLACE_GLOWSTONE;
         return true;
     }
@@ -148,16 +153,28 @@ public final class AnchorSequence {
         if (!state.is(Blocks.RESPAWN_ANCHOR)) return abort(mc);
         if (state.getValue(RespawnAnchorBlock.CHARGE) < 1) return waitOrAbort(mc);
 
-        BlockPos spot = anchorPos.relative(towardPlayer);
-        BlockPos ground = spot.below();
         int slot = findSlot(player, Items.GLOWSTONE);
 
-        if (slot < 0 || !isValidGlowstoneSpot(player, level, spot, ground)) {
-            step = Step.DETONATE;
+        // Recalculated from the player's CURRENT position every time this step runs.
+        // Sides are tried from the one closest to the player outward; the side
+        // opposite the player is never used.
+        BlockPos spot = null;
+        if (slot >= 0) {
+            for (Direction side : sidesByPlayerProximity(player, anchorPos)) {
+                BlockPos candidate = anchorPos.relative(side);
+                if (isValidGlowstoneSpot(player, level, candidate, candidate.below())) {
+                    spot = candidate;
+                    break;
+                }
+            }
+        }
+        if (spot == null) {
+            step = Step.DETONATE; // no protective position: skip, detonate immediately
             return false;
         }
-        if (!ensureSlot(player, slot)) return false;
+        if (!ensureSlot(player, slot)) return false; // position is re-evaluated after the switch
 
+        BlockPos ground = spot.below();
         BlockHitResult hit = new BlockHitResult(
                 Vec3.atCenterOf(ground).add(0.0, 0.5, 0.0), Direction.UP, ground, false);
         use(mc, player, hit);
@@ -172,9 +189,60 @@ public final class AnchorSequence {
 
         int slot = SafeAnchorConfig.get().detonationSlot - 1;
         if (!ensureSlot(player, slot)) return false;
-        use(mc, player, faceHit(anchorPos, towardPlayer));
+        use(mc, player, faceHit(anchorPos, pickAnchorFace(player, level)));
         reset(mc);
         return true;
+    }
+
+    // ------------------------------------------------------- player-relative
+
+    /**
+     * Horizontal sides of the anchor ordered by how close they are to the player
+     * (best protection first). Based on the player's exact position relative to the
+     * anchor centre; if the player is directly above/below it, the facing is used.
+     * Sides pointing away from the player are excluded.
+     */
+    private static List<Direction> sidesByPlayerProximity(LocalPlayer player, BlockPos anchor) {
+        double dx = player.getX() - (anchor.getX() + 0.5);
+        double dz = player.getZ() - (anchor.getZ() + 0.5);
+        if (Math.abs(dx) < 0.01 && Math.abs(dz) < 0.01) {
+            Direction facing = player.getDirection();
+            dx = -facing.getStepX();
+            dz = -facing.getStepZ();
+        }
+        final double fdx = dx;
+        final double fdz = dz;
+        List<Direction> sides = new ArrayList<>();
+        for (Direction d : HORIZONTAL) {
+            if (d.getStepX() * fdx + d.getStepZ() * fdz >= 0.0) sides.add(d);
+        }
+        sides.sort(Comparator.comparingDouble((Direction d) -> -(d.getStepX() * fdx + d.getStepZ() * fdz)));
+        return sides;
+    }
+
+    /**
+     * Picks an anchor face a real player could click: not covered by a solid block and
+     * facing the player's eyes. Prefers the side facing the player, then top, then others.
+     */
+    private Direction pickAnchorFace(LocalPlayer player, ClientLevel level) {
+        Vec3 eye = player.getEyePosition();
+        List<Direction> order = new ArrayList<>(sidesByPlayerProximity(player, anchorPos));
+        order.add(Direction.UP);
+        for (Direction d : HORIZONTAL) {
+            if (!order.contains(d)) order.add(d);
+        }
+        order.add(Direction.DOWN);
+
+        for (Direction d : order) {
+            BlockPos neighbour = anchorPos.relative(d);
+            if (level.getBlockState(neighbour).isFaceSturdy(level, neighbour, d.getOpposite())) continue;
+            Vec3 center = Vec3.atCenterOf(anchorPos)
+                    .add(d.getStepX() * 0.5, d.getStepY() * 0.5, d.getStepZ() * 0.5);
+            Vec3 normal = new Vec3(d.getStepX(), d.getStepY(), d.getStepZ());
+            if (eye.subtract(center).dot(normal) <= 0.0) continue; // face points away from the player
+            return d;
+        }
+        return Direction.UP;
     }
 
     private boolean isValidGlowstoneSpot(LocalPlayer player, ClientLevel level, BlockPos spot, BlockPos ground) {
@@ -184,14 +252,19 @@ public final class AnchorSequence {
         if (!groundState.isFaceSturdy(level, ground, Direction.UP)) return false;
         if (groundState.hasBlockEntity() || groundState.is(Blocks.RESPAWN_ANCHOR)) return false;
         if (!level.isUnobstructed(Blocks.GLOWSTONE.defaultBlockState(), spot, CollisionContext.empty())) return false;
-        return player.getEyePosition().distanceToSqr(Vec3.atCenterOf(ground)) <= 4.5 * 4.5;
+        Vec3 eye = player.getEyePosition();
+        if (eye.y <= ground.getY() + 1.0) return false; // must be able to click the top face
+        return eye.distanceToSqr(Vec3.atCenterOf(ground)) <= 4.5 * 4.5;
     }
+
+    // ---------------------------------------------------------------- helpers
 
     private static BlockHitResult faceHit(BlockPos pos, Direction face) {
         Vec3 loc = Vec3.atCenterOf(pos).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
         return new BlockHitResult(loc, face, pos, false);
     }
 
+    /** Standard client right-click: MultiPlayerGameMode#useItemOn sends the normal use-item-on packet. */
     private static boolean use(Minecraft mc, LocalPlayer player, BlockHitResult hit) {
         InteractionResult result = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
         if (result.consumesAction()) {
