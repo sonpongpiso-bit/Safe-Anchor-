@@ -17,6 +17,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -25,6 +27,7 @@ import java.util.List;
 public final class AnchorSequence {
     private enum Step { PLACE_ANCHOR, CHARGE, PLACE_GLOWSTONE, DETONATE }
 
+    private static final Logger LOG = LoggerFactory.getLogger("SafeAnchor");
     private static final int CONFIRM_TIMEOUT = 20;
     private static final Direction[] HORIZONTAL =
             { Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST };
@@ -155,21 +158,32 @@ public final class AnchorSequence {
 
         int slot = findSlot(player, Items.GLOWSTONE);
 
-        // Recalculated from the player's current world position every time this step runs.
-        // Only the single side of the anchor closest to the player is ever used.
-        Direction side = closestSide(player, anchorPos);
-        BlockPos spot = anchorPos.relative(side);   // same Y level as the anchor
-        BlockPos ground = spot.below();             // glowstone rests on this block
-
-        if (slot < 0 || !isValidGlowstoneSpot(player, level, spot, ground)) {
-            step = Step.DETONATE; // blocked / invalid: skip and detonate immediately
+        // 1-6: recalculated from the player's current X/Z every time this step runs.
+        Direction side = closestSide(player.getX(), player.getZ(), anchorPos);
+        if (side == null) {
+            LOG.info("[SafeAnchor] anchor={} player=({}, {}) -> no horizontal offset, skipping shield",
+                    anchorPos, fmt(player.getX()), fmt(player.getZ()));
+            step = Step.DETONATE;
             return false;
         }
-        if (!ensureSlot(player, slot)) return false; // direction is re-evaluated after the switch
+        BlockPos spot = anchorPos.relative(side); // anchor's Y level
+        BlockPos ground = spot.below();           // block the Glowstone rests on
 
+        String reason = slot < 0 ? "no glowstone in hotbar" : invalidReason(player, level, spot, ground);
+        if (reason != null) {
+            LOG.info("[SafeAnchor] anchor={} player=({}, {}) dir={} target={} -> skipped ({})",
+                    anchorPos, fmt(player.getX()), fmt(player.getZ()), side, spot, reason);
+            step = Step.DETONATE; // unavailable: skip and detonate immediately
+            return false;
+        }
+        if (!ensureSlot(player, slot)) return false; // target is recomputed after the switch
+
+        // Clicking the TOP face of the ground block places the block at ground.above() == spot.
         BlockHitResult hit = new BlockHitResult(
                 Vec3.atCenterOf(ground).add(0.0, 0.5, 0.0), Direction.UP, ground, false);
-        use(mc, player, hit);
+        boolean ok = use(mc, player, hit);
+        LOG.info("[SafeAnchor] anchor={} player=({}, {}) dir={} target={} clicked={} -> placed={}",
+                anchorPos, fmt(player.getX()), fmt(player.getZ()), side, spot, ground, ok);
         step = Step.DETONATE;
         return true;
     }
@@ -189,20 +203,22 @@ public final class AnchorSequence {
     // ------------------------------------------------------- player-relative
 
     /**
-     * The horizontal side (N/E/S/W) of the anchor closest to the player, from the vector
-     * anchor-centre -> player position. Uses world position only. Camera direction is used
-     * solely in the degenerate case where the player is exactly above/below the anchor centre.
+     * Exact coordinate logic. No yaw, no camera, no fixed direction.
+     *   dx = playerX - (anchorX + 0.5)
+     *   dz = playerZ - (anchorZ + 0.5)
+     *   |dx| > |dz| : dx > 0 -> EAST, dx < 0 -> WEST
+     *   |dz| >= |dx|: dz > 0 -> SOUTH, dz < 0 -> NORTH
+     * Returns null only if the player is exactly at the anchor's centre (no side exists).
      */
-    private static Direction closestSide(LocalPlayer player, BlockPos anchor) {
-        double dx = player.getX() - (anchor.getX() + 0.5);
-        double dz = player.getZ() - (anchor.getZ() + 0.5);
-        if (Math.abs(dx) < 1.0E-4 && Math.abs(dz) < 1.0E-4) {
-            return player.getDirection().getOpposite();
-        }
-        if (Math.abs(dx) >= Math.abs(dz)) {
+    private static Direction closestSide(double playerX, double playerZ, BlockPos anchor) {
+        double dx = playerX - (anchor.getX() + 0.5);
+        double dz = playerZ - (anchor.getZ() + 0.5);
+        if (Math.abs(dx) > Math.abs(dz)) {
             return dx > 0 ? Direction.EAST : Direction.WEST;
         }
-        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        if (dz > 0) return Direction.SOUTH;
+        if (dz < 0) return Direction.NORTH;
+        return null;
     }
 
     /** Horizontal sides ordered from closest to the player to farthest (used only for click faces). */
@@ -214,10 +230,7 @@ public final class AnchorSequence {
         return sides;
     }
 
-    /**
-     * Picks an anchor face a real player could click: not covered by a solid block and
-     * facing the player's eyes. Prefers the side facing the player, then top, then others.
-     */
+    /** Picks an anchor face a real player could click: not covered by a solid block and facing the player's eyes. */
     private Direction pickAnchorFace(LocalPlayer player, ClientLevel level) {
         Vec3 eye = player.getEyePosition();
         List<Direction> order = new ArrayList<>(sidesByPlayerProximity(player, anchorPos));
@@ -236,19 +249,25 @@ public final class AnchorSequence {
         return Direction.UP;
     }
 
-    private boolean isValidGlowstoneSpot(LocalPlayer player, ClientLevel level, BlockPos spot, BlockPos ground) {
+    /** Returns null when the spot is usable, otherwise the reason it is not (for the log). */
+    private String invalidReason(LocalPlayer player, ClientLevel level, BlockPos spot, BlockPos ground) {
         BlockState spotState = level.getBlockState(spot);
         BlockState groundState = level.getBlockState(ground);
-        if (!spotState.canBeReplaced()) return false;
-        if (!groundState.isFaceSturdy(level, ground, Direction.UP)) return false;
-        if (groundState.hasBlockEntity() || groundState.is(Blocks.RESPAWN_ANCHOR)) return false;
-        if (!level.isUnobstructed(Blocks.GLOWSTONE.defaultBlockState(), spot, CollisionContext.empty())) return false;
+        if (!spotState.canBeReplaced()) return "target not replaceable";
+        if (!groundState.isFaceSturdy(level, ground, Direction.UP)) return "no solid ground under target";
+        if (groundState.hasBlockEntity() || groundState.is(Blocks.RESPAWN_ANCHOR)) return "ground block is interactive";
+        if (!level.isUnobstructed(Blocks.GLOWSTONE.defaultBlockState(), spot, CollisionContext.empty())) return "entity in target";
         Vec3 eye = player.getEyePosition();
-        if (eye.y <= ground.getY() + 1.0) return false;
-        return eye.distanceToSqr(Vec3.atCenterOf(ground)) <= 4.5 * 4.5;
+        if (eye.y <= ground.getY() + 1.0) return "cannot see ground top face";
+        if (eye.distanceToSqr(Vec3.atCenterOf(ground)) > 4.5 * 4.5) return "out of reach";
+        return null;
     }
 
     // ---------------------------------------------------------------- helpers
+
+    private static String fmt(double v) {
+        return String.format("%.2f", v);
+    }
 
     private static BlockHitResult faceHit(BlockPos pos, Direction face) {
         Vec3 loc = Vec3.atCenterOf(pos).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
