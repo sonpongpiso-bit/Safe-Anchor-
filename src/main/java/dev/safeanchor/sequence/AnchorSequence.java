@@ -155,26 +155,18 @@ public final class AnchorSequence {
 
         int slot = findSlot(player, Items.GLOWSTONE);
 
-        // Recalculated from the player's CURRENT position every time this step runs.
-        // Sides are tried from the one closest to the player outward; the side
-        // opposite the player is never used.
-        BlockPos spot = null;
-        if (slot >= 0) {
-            for (Direction side : sidesByPlayerProximity(player, anchorPos)) {
-                BlockPos candidate = anchorPos.relative(side);
-                if (isValidGlowstoneSpot(player, level, candidate, candidate.below())) {
-                    spot = candidate;
-                    break;
-                }
-            }
-        }
-        if (spot == null) {
-            step = Step.DETONATE; // no protective position: skip, detonate immediately
+        // Recalculated from the player's current world position every time this step runs.
+        // Only the single side of the anchor closest to the player is ever used.
+        Direction side = closestSide(player, anchorPos);
+        BlockPos spot = anchorPos.relative(side);   // same Y level as the anchor
+        BlockPos ground = spot.below();             // glowstone rests on this block
+
+        if (slot < 0 || !isValidGlowstoneSpot(player, level, spot, ground)) {
+            step = Step.DETONATE; // blocked / invalid: skip and detonate immediately
             return false;
         }
-        if (!ensureSlot(player, slot)) return false; // position is re-evaluated after the switch
+        if (!ensureSlot(player, slot)) return false; // direction is re-evaluated after the switch
 
-        BlockPos ground = spot.below();
         BlockHitResult hit = new BlockHitResult(
                 Vec3.atCenterOf(ground).add(0.0, 0.5, 0.0), Direction.UP, ground, false);
         use(mc, player, hit);
@@ -197,26 +189,28 @@ public final class AnchorSequence {
     // ------------------------------------------------------- player-relative
 
     /**
-     * Horizontal sides of the anchor ordered by how close they are to the player
-     * (best protection first). Based on the player's exact position relative to the
-     * anchor centre; if the player is directly above/below it, the facing is used.
-     * Sides pointing away from the player are excluded.
+     * The horizontal side (N/E/S/W) of the anchor closest to the player, from the vector
+     * anchor-centre -> player position. Uses world position only. Camera direction is used
+     * solely in the degenerate case where the player is exactly above/below the anchor centre.
      */
+    private static Direction closestSide(LocalPlayer player, BlockPos anchor) {
+        double dx = player.getX() - (anchor.getX() + 0.5);
+        double dz = player.getZ() - (anchor.getZ() + 0.5);
+        if (Math.abs(dx) < 1.0E-4 && Math.abs(dz) < 1.0E-4) {
+            return player.getDirection().getOpposite();
+        }
+        if (Math.abs(dx) >= Math.abs(dz)) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        }
+        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+    }
+
+    /** Horizontal sides ordered from closest to the player to farthest (used only for click faces). */
     private static List<Direction> sidesByPlayerProximity(LocalPlayer player, BlockPos anchor) {
         double dx = player.getX() - (anchor.getX() + 0.5);
         double dz = player.getZ() - (anchor.getZ() + 0.5);
-        if (Math.abs(dx) < 0.01 && Math.abs(dz) < 0.01) {
-            Direction facing = player.getDirection();
-            dx = -facing.getStepX();
-            dz = -facing.getStepZ();
-        }
-        final double fdx = dx;
-        final double fdz = dz;
-        List<Direction> sides = new ArrayList<>();
-        for (Direction d : HORIZONTAL) {
-            if (d.getStepX() * fdx + d.getStepZ() * fdz >= 0.0) sides.add(d);
-        }
-        sides.sort(Comparator.comparingDouble((Direction d) -> -(d.getStepX() * fdx + d.getStepZ() * fdz)));
+        List<Direction> sides = new ArrayList<>(List.of(HORIZONTAL));
+        sides.sort(Comparator.comparingDouble((Direction d) -> -(d.getStepX() * dx + d.getStepZ() * dz)));
         return sides;
     }
 
@@ -227,10 +221,7 @@ public final class AnchorSequence {
     private Direction pickAnchorFace(LocalPlayer player, ClientLevel level) {
         Vec3 eye = player.getEyePosition();
         List<Direction> order = new ArrayList<>(sidesByPlayerProximity(player, anchorPos));
-        order.add(Direction.UP);
-        for (Direction d : HORIZONTAL) {
-            if (!order.contains(d)) order.add(d);
-        }
+        order.add(1, Direction.UP);
         order.add(Direction.DOWN);
 
         for (Direction d : order) {
@@ -239,7 +230,7 @@ public final class AnchorSequence {
             Vec3 center = Vec3.atCenterOf(anchorPos)
                     .add(d.getStepX() * 0.5, d.getStepY() * 0.5, d.getStepZ() * 0.5);
             Vec3 normal = new Vec3(d.getStepX(), d.getStepY(), d.getStepZ());
-            if (eye.subtract(center).dot(normal) <= 0.0) continue; // face points away from the player
+            if (eye.subtract(center).dot(normal) <= 0.0) continue;
             return d;
         }
         return Direction.UP;
@@ -253,7 +244,7 @@ public final class AnchorSequence {
         if (groundState.hasBlockEntity() || groundState.is(Blocks.RESPAWN_ANCHOR)) return false;
         if (!level.isUnobstructed(Blocks.GLOWSTONE.defaultBlockState(), spot, CollisionContext.empty())) return false;
         Vec3 eye = player.getEyePosition();
-        if (eye.y <= ground.getY() + 1.0) return false; // must be able to click the top face
+        if (eye.y <= ground.getY() + 1.0) return false;
         return eye.distanceToSqr(Vec3.atCenterOf(ground)) <= 4.5 * 4.5;
     }
 
