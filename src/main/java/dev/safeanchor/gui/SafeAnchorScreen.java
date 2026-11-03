@@ -9,7 +9,6 @@ import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 import org.lwjgl.glfw.GLFW;
 
-/** Safe Anchor settings menu. ESC closes it (or cancels key capture). */
 public final class SafeAnchorScreen extends Screen {
     private enum Listening { NONE, ACTIVATION, MENU }
 
@@ -20,6 +19,7 @@ public final class SafeAnchorScreen extends Screen {
     private Button menuButton;
     private Button slotButton;
     private Button speedButton;
+    private Button scrollButton;
 
     public SafeAnchorScreen(Screen parent) {
         super(Component.literal("Safe Anchor"));
@@ -32,7 +32,7 @@ public final class SafeAnchorScreen extends Screen {
         int w = 220;
         int h = 20;
         int x = this.width / 2 - w / 2;
-        int y = this.height / 2 - 60;
+        int y = this.height / 2 - 75;
         int gap = 26;
 
         StringWidget titleWidget = new StringWidget(x, y - 24, w, 12, this.title, this.font);
@@ -61,13 +61,21 @@ public final class SafeAnchorScreen extends Screen {
             refresh();
         }).bounds(x, y + gap * 3, w, h).build();
 
+        scrollButton = Button.builder(Component.empty(), b -> {
+            cfg.hotbarScrollDelay = cfg.hotbarScrollDelay >= SafeAnchorConfig.MAX_SCROLL
+                    ? SafeAnchorConfig.MIN_SCROLL : cfg.hotbarScrollDelay + 1;
+            SafeAnchorConfig.save();
+            refresh();
+        }).bounds(x, y + gap * 4, w, h).build();
+
         Button done = Button.builder(Component.literal("Done"), b -> onClose())
-                .bounds(x, y + gap * 4 + 6, w, h).build();
+                .bounds(x, y + gap * 5 + 6, w, h).build();
 
         this.addRenderableWidget(activationButton);
         this.addRenderableWidget(menuButton);
         this.addRenderableWidget(slotButton);
         this.addRenderableWidget(speedButton);
+        this.addRenderableWidget(scrollButton);
         this.addRenderableWidget(done);
         refresh();
     }
@@ -81,6 +89,8 @@ public final class SafeAnchorScreen extends Screen {
         slotButton.setMessage(Component.literal("Detonation Hotbar Slot: " + cfg.detonationSlot));
         speedButton.setMessage(Component.literal("Tick Speed: " + cfg.tickSpeed
                 + " (" + SafeAnchorConfig.MIN_TICKS + "-" + SafeAnchorConfig.MAX_TICKS + ")"));
+        scrollButton.setMessage(Component.literal("Hotbar Scroll Delay: " + cfg.hotbarScrollDelay
+                + (cfg.hotbarScrollDelay == 0 ? " (instant)" : " tick(s)")));
     }
 
     @Override
@@ -89,19 +99,19 @@ public final class SafeAnchorScreen extends Screen {
             int key = event.key();
             if (key != GLFW.GLFW_KEY_ESCAPE) {
                 SafeAnchorConfig cfg = SafeAnchorConfig.get();
-                int value = key == GLFW.GLFW_KEY_DELETE ? -1 : key; // DELETE = unbind
+                int value = key == GLFW.GLFW_KEY_DELETE ? -1 : key;
                 if (listening == Listening.ACTIVATION) {
                     cfg.activationKey = value;
                 } else if (value >= 0) {
-                    cfg.menuKey = value; // the menu key can't be unbound
+                    cfg.menuKey = value;
                 }
                 SafeAnchorConfig.save();
             }
             listening = Listening.NONE;
             refresh();
-            return true; // consume (also swallows ESC while capturing)
+            return true;
         }
-        return super.keyPressed(event); // ESC closes the screen
+        return super.keyPressed(event);
     }
 
     @Override
