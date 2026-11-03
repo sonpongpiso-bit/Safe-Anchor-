@@ -4,7 +4,7 @@
   "version": "${version}",
   "name": "Safe Anchor",
   "description": "One-key respawn anchor sequence: place, charge, shield with glowstone, detonate. Configurable via an in-game menu (INSERT).",
-  "authors": ["Safe Anchor Contributors"],
+  "authors": ["xyvar"],
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
