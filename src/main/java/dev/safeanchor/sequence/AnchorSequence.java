@@ -218,7 +218,7 @@ public final class AnchorSequence {
         if (!groundState.isFaceSturdy(level, ground, Direction.UP)) return false;
         if (groundState.hasBlockEntity() || groundState.is(Blocks.RESPAWN_ANCHOR)) return false; // would open GUI / recharge
         if (!level.isUnobstructed(Blocks.GLOWSTONE.defaultBlockState(), spot, CollisionContext.empty())) return false;
-        return player.canInteractWithBlock(ground, 0.0);
+                return player.getEyePosition().distanceToSqr(Vec3.atCenterOf(ground)) <= 4.5 * 4.5;
     }
 
     private static BlockHitResult faceHit(BlockPos pos, Direction face) {
@@ -272,6 +272,6 @@ public final class AnchorSequence {
     }
 
     private static void msg(LocalPlayer player, String text) {
-        player.displayClientMessage(Component.literal("[Safe Anchor] " + text), true);
+        player.sendSystemMessage(Component.literal("[Safe Anchor] " + text));
     }
 }
